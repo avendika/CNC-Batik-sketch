@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CNC Batik Controller</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet"/>
+  <script src="https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js"></script>
+<style>
+    body { background-image: url('../static/img/background.png'); background-size: cover; background-position: center; background-repeat: no-repeat; color: #333; font-family: 'Segoe UI', sans-serif; min-height: 100vh; }
+    .main-container { max-width: 1400px; }
+    .btn-custom { width: 100%; background-color: #007bff; color: white; font-weight: bold; border-radius: 10px; padding: 10px; border: none; margin: 5px 0; }
+    .btn-custom:hover { background-color: #0056b3; }
+    .btn-danger-custom { background-color: #dc3545; }
+    .btn-danger-custom:hover { background-color: #c82333; }
+    .gcode-line { padding: 5px; margin: 2px 0; border-radius: 3px; font-family: monospace; font-size: 0.9em; }
+    .line-pending { background-color: #f0f0f0; color: #333; }
+    .line-processing { background-color: #fff3cd; color: #856404; font-weight: bold; }
+    .line-done { background-color: #d4edda; color: #155724; }
+    .tab-content { background: #ffffff90; border-radius: 15px; padding: 20px; margin-top: 10px; border: 1px solid #dee2e6; }
+    .card { background: #ffffff90; border: 1px solid #dee2e6; border-radius: 15px; }
+    .jog-pad { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; }
+    .jog-btn { height: 50px; }
+    .metric-card { background: #f8f9fa; padding: 10px; border-radius: 10px; text-align: center; border: 1px solid #dee2e6; }
+    .expander { background: #f8f9fa; padding: 15px; border-radius: 10px; margin: 10px 0; border: 1px solid #dee2e6; }
+    .expander-header { cursor: pointer; font-weight: bold; }
+    .expander-content { display: none; }
+    .expander.open .expander-content { display: block; }
+    .completion-banner { background: #28a745; padding: 20px; border-radius: 15px; text-align: center; margin: 20px 0; animation: fadeIn 0.5s; color: white; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+    .image-preview-container { position: relative; display: inline-block; }
+    .btn-remove-image { position: absolute; top: 10px; right: 10px; background: rgba(220, 53, 69, 0.9); border: none; border-radius: 50%; width: 35px; height: 35px; color: white; font-size: 20px; cursor: pointer; z-index: 10; }
+    .btn-remove-image:hover { background: rgba(200, 35, 51, 1); transform: scale(1.1); }
+    .nav-tabs .nav-link { color: white !important; }
+    .nav-tabs .nav-link.active { color: white !important; background-color: #007bff !important; border-color: transparent; }
+    h1.text-center { color: white; }
+    p.text-center { color: white; }
+  </style>
+</head>
+<body>
+  <div class="container-fluid py-4 main-container">
+    <h1 class="text-center">CNC Batik Controller</h1>
+    <p class="text-center">Control CNC via Wemos D1 R32 using MQTT Protocol</p>
+    <hr style="border-color: #dee2e6;"/>
+
+    <div class="row">
+      <!-- SIDEBAR -->
+      <div class="col-md-3">
+        <div class="card p-3 mb-3">
+          <h5>MQTT Connection</h5>
+          <small>Broker: <span id="broker-name">broker.hivemq.com</span>:1883</small>
+          <div class="d-flex gap-2 mt-2">
+            <button id="btn-connect" class="btn btn-custom btn-sm">Connect</button>
+            <button id="btn-disconnect" class="btn btn-custom btn-sm" disabled>Disconnect</button>
+          </div>
+          <div id="mqtt-status" class="mt-2 small">
+            Status: <span id="status-text" class="text-warning">Disconnected</span>
+          </div>
+          <div id="connection-log" class="mt-2 small text-muted" style="max-height: 80px; overflow-y: auto; font-size: 0.8em;"></div>
+        </div>
+
+        <div class="card p-3">
+          <h5>Settings</h5>
+          <label>Blur Kernel</label>
+          <input type="range" id="blur" min="3" max="15" step="2" value="5" class="form-range"/>
+          <label>Canny Low</label>
+          <input type="range" id="canny-low" min="0" max="200" value="50" class="form-range"/>
+          <label>Canny High</label>
+          <input type="range" id="canny-high" min="0" max="300" value="150" class="form-range"/>
+          <label>Feed Rate</label>
+          <input type="number" id="feed-rate" value="1000" class="form-control form-control-sm"/>
+          <label>Pen Up (Z mm)</label>
+          <input type="number" id="pen-up" value="90" class="form-control form-control-sm" step="0.1"/>
+          <label>Pen Down (Z mm)</label>
+          <input type="number" id="pen-down" value="45" class="form-control form-control-sm" step="0.1"/>
+        </div>
+
+        <div class="card p-3 mt-3">
+          <h5>MQTT Topics</h5>
+          <code class="d-block small">G-code: cnc/batik/gcode</code>
+          <code class="d-block small">Status: cnc/batik/status</code>
+          <code class="d-block small">Control: cnc/batik/control</code>
+        </div>
+      </div>
+
+      <!-- MAIN TABS -->
+      <div class="col-md-9">
+        <ul class="nav nav-tabs" id="myTab" role="tablist">
+          <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab1">Image to G-code</a></li>
+          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab2">Manual Control</a></li>
+          <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab3">Calibration</a></li>
+        </ul>
+
+        <div class="tab-content mt-3">
+          <!-- TAB 1 -->
+          <div class="tab-pane fade show active" id="tab1">
+            <div id="upload-section">
+              <input type="file" id="image-upload" accept="image/*" class="form-control mb-3"/>
+            </div>
+            
+            <div id="completion-banner" class="completion-banner d-none">
+              <h3>Program Selesai!</h3>
+              <p class="mb-0">Semua G-code telah dieksekusi dengan sukses</p>
+              <div class="mt-3">
+                <button id="btn-reset-all" class="btn btn-light btn-lg">Mulai Project Baru</button>
+              </div>
+            </div>
+
+            <div id="preview" class="row"></div>
+            
+            <div id="control-panel" class="mt-3 d-none">
+              <div class="row g-2">
+                <div class="col"><button id="btn-start" class="btn btn-custom">START</button></div>
+                <div class="col"><button id="btn-stop" class="btn btn-custom btn-danger-custom">STOP</button></div>
+                <div class="col"><div id="progress-text" class="metric-card">Progress: 0/0</div></div>
+                <div class="col"><div id="progress-pct" class="metric-card">0%</div></div>
+              </div>
+              <div class="progress mt-2"><div id="progress-bar" class="progress-bar bg-success" style="width: 0%"></div></div>
+            </div>
+            
+            <div id="gcode-viewer" class="mt-3" style="max-height: 400px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 10px; border: 1px solid #dee2e6;"></div>
+            
+            <div id="download-section" class="mt-3 d-none row">
+              <div class="col"><button id="btn-download-gcode" class="btn btn-custom btn-sm">Download G-code</button></div>
+            </div>
+            
+            <div id="stats" class="mt-3 d-none">
+              <h5>Statistics</h5>
+              <div class="row">
+                <div class="col"><div class="metric-card">Lines: <span id="stat-lines">0</span></div></div>
+                <div class="col"><div class="metric-card">Size: <span id="stat-size">0x0</span> mm</div></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 2 -->
+          <div class="tab-pane fade" id="tab2">
+            <div class="row">
+              <div class="col-md-8">
+                <h5>Jog Control</h5>
+                <div class="row mb-3">
+                  <div class="col"><input type="number" id="jog-distance" value="10" class="form-control form-control-sm" placeholder="Step (mm)"/></div>
+                  <div class="col"><input type="number" id="jog-speed" value="1000" class="form-control form-control-sm" placeholder="Speed (F)"/></div>
+                </div>
+                <div class="jog-pad mb-4">
+                  <div></div>
+                  <button class="btn btn-custom jog-btn" data-jog="y+">Y+</button>
+                  <div></div>
+                  <button class="btn btn-custom jog-btn" data-jog="x-">X-</button>
+                  <button class="btn btn-custom jog-btn" data-jog="home-xy">Home XY</button>
+                  <button class="btn btn-custom jog-btn" data-jog="x+">X+</button>
+                  <div></div>
+                  <button class="btn btn-custom jog-btn" data-jog="y-">Y-</button>
+                  <div></div>
+                </div>
+                
+                <h5>Z Control (Pen)</h5>
+                <div class="d-flex gap-2 mb-3">
+                  <button class="btn btn-custom flex-fill" data-cmd="pen-up">Pen Up</button>
+                  <button class="btn btn-custom flex-fill" data-cmd="pen-down">Pen Down</button>
+                </div>
+                
+                <h5>Quick Actions</h5>
+                <div class="row g-2 mb-3">
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="M17">Enable Motors</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm btn-danger-custom" data-cmd="M18">Disable Motors</button></div>
+                </div>
+                
+                <h5 class="mt-4">Custom G-code</h5>
+                <div class="input-group mb-3">
+                  <input type="text" id="custom-gcode" class="form-control" placeholder="G0 X10 Y20"/>
+                  <button id="btn-send-custom" class="btn btn-custom">Send</button>
+                </div>
+                
+                <div class="row g-2">
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G90">Absolute Mode</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G91">Relative Mode</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G92.1">Clear Offset</button></div>
+                </div>
+              </div>
+              
+              <div class="col-md-4">
+                <h5>Position</h5>
+                <div class="metric-card mb-2">X: <span id="pos-x">0.00</span> mm</div>
+                <div class="metric-card mb-2">Y: <span id="pos-y">0.00</span> mm</div>
+                <div class="metric-card mb-2">Z: <span id="pos-z">0.00</span> mm</div>
+                <div class="metric-card mb-2">Mode: <span id="pos-mode">Absolute</span></div>
+                <div class="metric-card">Motors: <span id="motor-status">OFF</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 3 -->
+          <div class="tab-pane fade" id="tab3">
+            <div class="expander open" id="exp-home">
+              <div class="expander-header" onclick="toggleExpander(this)">Step 1: Home All Axes</div>
+              <div class="expander-content p-3">
+                <div class="row g-2">
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G28 X">Home X</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G28 Y">Home Y</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G28 Z">Home Z</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" data-cmd="G28">Home All</button></div>
+                </div>
+              </div>
+            </div>
+            
+            <div class="expander" id="exp-zero">
+              <div class="expander-header" onclick="toggleExpander(this)">Step 2: Set Work Zero</div>
+              <div class="expander-content p-3">
+                <button class="btn btn-custom" data-cmd="G92 X0 Y0 Z0">Set Current as Zero</button>
+                <button class="btn btn-custom mt-2" data-cmd="G92.1">Clear Offset</button>
+              </div>
+            </div>
+            
+            <div class="expander" id="exp-pen">
+              <div class="expander-header" onclick="toggleExpander(this)">Step 3: Pen Height</div>
+              <div class="expander-content p-3">
+                <label>Pen Down Position (Servo Angle)</label>
+                <input type="number" id="test-pen-down" value="45" class="form-control form-control-sm mb-2" step="1"/>
+                <button class="btn btn-custom btn-sm" onclick="sendManualGcode(`M3 S${document.getElementById('test-pen-down').value}`)">Test Pen Down</button>
+                
+                <label class="mt-3">Pen Up Position (Servo Angle)</label>
+                <input type="number" id="test-pen-up" value="90" class="form-control form-control-sm mb-2" step="1"/>
+                <button class="btn btn-custom btn-sm" onclick="sendManualGcode(`M5 S${document.getElementById('test-pen-up').value}`)">Test Pen Up</button>
+              </div>
+            </div>
+            
+            <div class="expander" id="exp-test">
+              <div class="expander-header" onclick="toggleExpander(this)">Step 4: Test Pattern</div>
+              <div class="expander-content p-3">
+                <label>Pattern Size (mm)</label>
+                <input type="number" id="test-size" value="50" class="form-control form-control-sm mb-2"/>
+                <div class="row g-2">
+                  <div class="col"><button class="btn btn-custom btn-sm" id="btn-square">Square</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" id="btn-cross">Cross</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" id="btn-circle">Circle</button></div>
+                  <div class="col"><button class="btn btn-custom btn-sm" id="btn-triangle">Triangle</button></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ===== MQTT CONFIGURATION =====
+const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+const MQTT_TOPIC_GCODE = 'cnc/batik/gcode';
+const MQTT_TOPIC_STATUS = 'cnc/batik/status';
+const MQTT_TOPIC_CONTROL = 'cnc/batik/control';
+const MQTT_TOPIC_PROGRESS = 'cnc/batik/progress';
+
+// ✅ REDUCED BATCH SIZE - Message terlalu besar!
+const GCODE_BATCH_SIZE = 100; // Reduced from 500 to 100 
+
+let mqttClient = null;
+let gcodeLines = [];
+
+// Tracking variables
+let currentBatchIndex = 0;
+let processedLines = 0;
+let waitingForCompletion = false; // ✅ NEW: Flag untuk tunggu Wemos selesai
+let lastBatchSize = 0; // ✅ NEW: Track ukuran batch terakhir yang dikirim
+
+let isRunning = false;
+let penUp = 90, penDown = 45;
+let currentPosition = { x: 0, y: 0, z: 0 };
+let imageUploaded = false;
+
+const btnConnect = document.getElementById('btn-connect');
+const btnDisconnect = document.getElementById('btn-disconnect');
+const statusText = document.getElementById('status-text');
+const logDiv = document.getElementById('connection-log');
+
+function addLog(msg, type = 'info') {
+  const time = new Date().toLocaleTimeString();
+  const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+  const p = document.createElement('div');
+  p.innerHTML = `<small>${icon} [${time}] ${msg}</small>`;
+  logDiv.prepend(p);
+  if (logDiv.children.length > 10) logDiv.removeChild(logDiv.lastChild);
+}
+
+// ===== MQTT FUNCTIONS =====
+function connectMQTT() {
+  if (mqttClient && mqttClient.connected) {
+    addLog('Already connected', 'info');
+    return;
+  }
+
+  btnConnect.disabled = true;
+  statusText.textContent = '🟡 Connecting...';
+  statusText.className = 'text-warning';
+  addLog('Connecting to broker...');
+
+  try {
+    mqttClient = mqtt.connect(MQTT_BROKER, {
+      clientId: `batik_web_${Math.random().toString(16).substr(2, 8)}`,
+      clean: true,
+      reconnectPeriod: 5000,
+      connectTimeout: 30000
+    });
+
+    mqttClient.on('connect', () => {
+      addLog('Connected to broker!', 'success');
+      statusText.textContent = '🟢 Connected';
+      statusText.className = 'text-success';
+      btnConnect.disabled = true;
+      btnDisconnect.disabled = false;
+
+      mqttClient.subscribe(MQTT_TOPIC_STATUS, (err) => {
+        if (!err) addLog('Subscribed to status topic', 'success');
+      });
+      
+      mqttClient.subscribe(MQTT_TOPIC_PROGRESS, (err) => {
+        if (!err) addLog('Subscribed to progress topic', 'success');
+      });
+    });
+
+    mqttClient.on('message', (topic, message) => {
+      try {
+        const payload = JSON.parse(message.toString());
+        
+        if (topic === MQTT_TOPIC_STATUS) {
+          // Update Posisi CNC
+          if ('x' in payload) currentPosition.x = payload.x;
+          if ('y' in payload) currentPosition.y = payload.y;
+          if ('z' in payload) currentPosition.z = payload.z;
+          
+          document.getElementById('pos-x').textContent = currentPosition.x.toFixed(2);
+          document.getElementById('pos-y').textContent = currentPosition.y.toFixed(2);
+          document.getElementById('pos-z').textContent = currentPosition.z.toFixed(2);
+
+          if ('absolute' in payload) {
+            document.getElementById('pos-mode').textContent = payload.absolute ? 'Absolute' : 'Relative';
+          }
+
+          if ('motors' in payload) {
+            document.getElementById('motor-status').textContent = payload.motors ? '✅ ON' : '❌ OFF';
+          }
+
+          // Status dari Wemos
+          if (payload.status) {
+            handleWemosStatus(payload.status, payload);
+          }
+        }
+        
+        // Progress update
+        if (topic === MQTT_TOPIC_PROGRESS) {
+          if ('line' in payload && 'total' in payload) {
+            // ✅ FIXED: Hitung progress kumulatif
+            // currentBatchIndex = total lines dari batch sebelumnya yang sudah selesai
+            // payload.line = progress di batch saat ini (1-100)
+            const calculatedProgress = currentBatchIndex + payload.line;
+            
+            // ✅ FIXED: Batasi progress tidak boleh melebihi total lines
+            processedLines = Math.min(calculatedProgress, gcodeLines.length);
+            
+            updateProgress();
+            updateGcodeViewer();
+            
+            // Cek completion
+            if (processedLines >= gcodeLines.length && gcodeLines.length > 0) {
+              showCompletionBanner();
+            }
+          }
+        }
+        
+      } catch (e) {
+        console.error('Error parsing MQTT message:', e);
+      }
+    });
+
+    mqttClient.on('error', (err) => {
+      addLog(`Error: ${err.message}`, 'error');
+      statusText.textContent = '🔴 Error';
+      statusText.className = 'text-danger';
+    });
+
+    mqttClient.on('close', () => {
+      addLog('Connection closed');
+      statusText.textContent = '🔴 Disconnected';
+      statusText.className = 'text-danger';
+      btnConnect.disabled = false;
+      btnDisconnect.disabled = true;
+    });
+
+  } catch (err) {
+    addLog(`Failed to connect: ${err.message}`, 'error');
+    btnConnect.disabled = false;
+  }
+}
+
+// ✅ HANDLER STATUS DARI WEMOS
+function handleWemosStatus(status, payload) {
+  switch(status) {
+    case 'batch_received':
+      addLog(`✅ Batch received: ${payload.received_lines} lines (Total: ${payload.total_buffered})`, 'success');
+      
+      // ✅ FIXED: Jangan kirim batch berikutnya, tunggu 'completed' dulu
+      if (currentBatchIndex >= gcodeLines.length) {
+        addLog('✅ All batches sent! Wemos will auto-start...', 'success');
+        waitingForCompletion = true;
+      } else {
+        addLog(`⏳ Batch sent, waiting for Wemos to process...`, 'info');
+        waitingForCompletion = true;
+      }
+      break;
+      
+    case 'started':
+      addLog('🚀 Wemos started execution!', 'success');
+      isRunning = true;
+      break;
+      
+    case 'completed':
+      addLog('✅ Wemos completed batch!', 'success');
+      waitingForCompletion = false;
+      
+      // ✅ FIXED: Update currentBatchIndex SETELAH batch selesai
+      currentBatchIndex += lastBatchSize;
+      
+      // ✅ FIXED: Kirim batch berikutnya setelah Wemos selesai
+      if (currentBatchIndex < gcodeLines.length) {
+        setTimeout(() => {
+          addLog(`📦 Sending next batch (${Math.floor(currentBatchIndex / GCODE_BATCH_SIZE) + 1}/${Math.ceil(gcodeLines.length / GCODE_BATCH_SIZE)})...`, 'info');
+          sendGcodeBatch();
+        }, 500); // Delay 500ms sebelum kirim batch berikutnya
+      } else {
+        // ✅ Semua batch sudah selesai diproses
+        addLog('✅ All batches completed! Finalizing...', 'success');
+        
+        // ✅ Kirim perintah finalisasi: angkat pen dan disable motors
+        setTimeout(() => {
+          sendManualGcode('M5 S90'); // Pen up
+          addLog('📤 Pen up command sent', 'info');
+          setTimeout(() => {
+            sendManualGcode('M18'); // Disable motors
+            addLog('📤 Motors disabled', 'info');
+            isRunning = false;
+            showCompletionBanner();
+          }, 500);
+        }, 500);
+      }
+      break;
+      
+    case 'stopped':
+      addLog('⏹️ Wemos stopped', 'info');
+      isRunning = false;
+      break;
+      
+    case 'paused':
+      addLog('⏸️ Wemos paused', 'info');
+      break;
+      
+    case 'running':
+      addLog('▶️ Wemos resumed', 'info');
+      break;
+      
+    case 'homed':
+      addLog('🏠 Wemos homed', 'success');
+      break;
+      
+    case 'emergency_stop':
+      addLog('🛑 EMERGENCY STOP!', 'error');
+      isRunning = false;
+      break;
+      
+    case 'buffer_cleared':
+      addLog('🗑️ Wemos buffer cleared', 'info');
+      break;
+  }
+}
+
+function disconnectMQTT() {
+  if (mqttClient) {
+    mqttClient.end();
+    mqttClient = null;
+    addLog('Disconnected from broker');
+    statusText.textContent = '🔴 Disconnected';
+    statusText.className = 'text-danger';
+    btnConnect.disabled = false;
+    btnDisconnect.disabled = true;
+  }
+}
+
+function publishMQTT(topic, message) {
+  if (mqttClient && mqttClient.connected) {
+    mqttClient.publish(topic, JSON.stringify(message));
+    return true;
+  }
+  addLog('Not connected to MQTT', 'error');
+  return false;
+}
+
+function sendManualGcode(gcode) {
+  const commands = gcode.split('\n');
+  commands.forEach(cmd => {
+    if (cmd.trim()) {
+      const msg = {
+        command: 'manual',
+        gcode: cmd.trim(),
+        timestamp: Date.now() / 1000
+      };
+      publishMQTT(MQTT_TOPIC_GCODE, msg);
+    }
+  });
+}
+
+// ✅ KIRIM BATCH G-CODE - SEQUENTIAL MODE
+function sendGcodeBatch() {
+  if (currentBatchIndex >= gcodeLines.length) {
+    addLog('All batches sent!', 'info');
+    return;
+  }
+
+  const batchStart = currentBatchIndex;
+  const batchEnd = Math.min(batchStart + GCODE_BATCH_SIZE, gcodeLines.length);
+  const batchNumber = Math.floor(batchStart / GCODE_BATCH_SIZE) + 1;
+  const totalBatches = Math.ceil(gcodeLines.length / GCODE_BATCH_SIZE);
+  
+  const batchGcode = gcodeLines.slice(batchStart, batchEnd).join('\n');
+  
+  const msg = {
+    command: 'batch',
+    start_line: batchStart, 
+    num_lines: batchEnd - batchStart,
+    gcode_data: batchGcode,
+    timestamp: Date.now() / 1000
+  };
+
+  if (publishMQTT(MQTT_TOPIC_GCODE, msg)) {
+    addLog(`📦 Batch ${batchNumber}/${totalBatches} sent: Lines ${batchStart + 1}-${batchEnd}`, 'info');
+    // ✅ FIXED: Simpan ukuran batch, tapi JANGAN update currentBatchIndex dulu
+    lastBatchSize = batchEnd - batchStart;
+    updateGcodeViewer();
+  } else {
+    addLog('❌ Failed to publish G-code batch', 'error');
+  }
+}
+
+// ✅ START CNC - SUPER SIMPLE
+function startCNC() {
+  if (!mqttClient || !mqttClient.connected) {
+    addLog('❌ Connect to MQTT first!', 'error');
+    return;
+  }
+  if (gcodeLines.length === 0) {
+    addLog('❌ No G-code loaded!', 'error');
+    return;
+  }
+
+  currentBatchIndex = 0;
+  processedLines = 0;
+  document.getElementById('completion-banner').classList.add('d-none');
+  
+  addLog(`🚀 Sending batch (${gcodeLines.length} lines)...`, 'success');
+  
+  // Kirim batch - Wemos akan auto-start
+  sendGcodeBatch();
+}
+
+function stopCNC() {
+  isRunning = false;
+  const msg = { command: 'stop' };
+  publishMQTT(MQTT_TOPIC_CONTROL, msg);
+  addLog('⏹️ Stop command sent');
+}
+
+function pauseCNC() {
+  const msg = { command: 'pause' };
+  publishMQTT(MQTT_TOPIC_CONTROL, msg);
+  addLog('⏸️ Pause/Resume toggled');
+}
+
+function homeCNC() {
+  const msg = { command: 'home' };
+  publishMQTT(MQTT_TOPIC_CONTROL, msg);
+  addLog('🏠 Homing...');
+}
+
+// ✅ UPDATE PROGRESS
+function updateProgress() {
+  const total = gcodeLines.length;
+  const done = processedLines;
+  const pct = total > 0 ? (done / total * 100).toFixed(1) : 0;
+  
+  document.getElementById('progress-text').textContent = `Progress: ${done}/${total}`;
+  document.getElementById('progress-pct').textContent = `${pct}%`;
+  document.getElementById('progress-bar').style.width = `${pct}%`;
+}
+
+// ✅ UPDATE G-CODE VIEWER
+function updateGcodeViewer() {
+  const container = document.getElementById('gcode-viewer');
+  if (gcodeLines.length === 0) {
+    container.innerHTML = '<div class="text-center text-muted">No G-code loaded</div>';
+    return;
+  }
+
+  const currentLine = processedLines;
+  const start = Math.max(0, currentLine - 5);
+  const end = Math.min(gcodeLines.length, start + 20);
+  container.innerHTML = '';
+  
+  for (let i = start; i < end; i++) {
+    const div = document.createElement('div');
+    div.className = 'gcode-line ';
+    
+    if (i < currentLine) {
+      div.className += 'line-done';
+      div.innerHTML = `✓ [${i + 1}] ${gcodeLines[i]}`;
+    } else if (i < currentBatchIndex && isRunning) {
+      div.className += 'line-processing';
+      div.innerHTML = `⏩ [${i + 1}] ${gcodeLines[i]}`;
+    } else {
+      div.className += 'line-pending';
+      div.innerHTML = `[${i + 1}] ${gcodeLines[i]}`;
+    }
+    
+    container.appendChild(div);
+    
+    if (i === currentLine) {
+      div.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+}
+
+function showCompletionBanner() {
+  isRunning = false;
+  document.getElementById('completion-banner').classList.remove('d-none');
+  addLog('✅ Program completed!', 'success');
+}
+
+function resetAll() {
+  if (mqttClient && mqttClient.connected) {
+    const msg = { command: 'clear_buffer' };
+    publishMQTT(MQTT_TOPIC_CONTROL, msg);
+  }
+  
+  gcodeLines = [];
+  currentBatchIndex = 0;
+  processedLines = 0;
+  waitingForCompletion = false; // ✅ FIXED
+  isRunning = false;
+  imageUploaded = false;
+  
+  document.getElementById('image-upload').value = '';
+  document.getElementById('preview').innerHTML = '';
+  document.getElementById('control-panel').classList.add('d-none');
+  document.getElementById('download-section').classList.add('d-none');
+  document.getElementById('stats').classList.add('d-none');
+  document.getElementById('completion-banner').classList.add('d-none');
+  document.getElementById('gcode-viewer').innerHTML = '<div class="text-center text-muted">No G-code loaded</div>';
+  
+  updateProgress();
+  
+  addLog('🔄 Reset successful', 'success');
+}
+
+// ===== IMAGE UPLOAD & PROCESSING =====
+document.getElementById('image-upload').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('blur', document.getElementById('blur').value);
+  formData.append('canny_low', document.getElementById('canny-low').value);
+  formData.append('canny_high', document.getElementById('canny-high').value);
+  formData.append('feed_rate', document.getElementById('feed-rate').value);
+  formData.append('pen_up', document.getElementById('pen-up').value);
+  formData.append('pen_down', document.getElementById('pen-down').value);
+
+  penUp = parseFloat(document.getElementById('pen-up').value);
+  penDown = parseFloat(document.getElementById('pen-down').value);
+
+  try {
+    addLog('Processing image...', 'info');
+    const response = await fetch('/process_image', { method: 'POST', body: formData });
+    const data = await response.json();
+
+    gcodeLines = data.gcode;
+    currentBatchIndex = 0;
+    processedLines = 0;
+    imageUploaded = true;
+
+    document.getElementById('preview').innerHTML = `
+      <div class="col-6 image-preview-container">
+        <button class="btn-remove-image" onclick="resetAll()" title="Remove">✕</button>
+        <h6>Original Image</h6>
+        <img src="${URL.createObjectURL(file)}" class="img-fluid rounded"/>
+      </div>
+      <div class="col-6 image-preview-container">
+        <h6>Detected Edges</h6>
+        <img src="data:image/png;base64,${data.edges_base64}" class="img-fluid rounded"/>
+      </div>
+    `;
+
+    document.getElementById('control-panel').classList.remove('d-none');
+    document.getElementById('download-section').classList.remove('d-none');
+    document.getElementById('stats').classList.remove('d-none');
+
+    document.getElementById('stat-lines').textContent = gcodeLines.length;
+    document.getElementById('stat-size').textContent = `${data.width.toFixed(1)}×${data.height.toFixed(1)}`;
+
+    updateGcodeViewer();
+    updateProgress();
+    addLog(`✅ G-code generated: ${gcodeLines.length} lines`, 'success');
+    addLog(`📊 Batches: ${Math.ceil(gcodeLines.length / GCODE_BATCH_SIZE)}`, 'info');
+
+    document.getElementById('btn-download-gcode').onclick = () => {
+      const blob = new Blob([gcodeLines.join('\n')], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'batik.gcode';
+      a.click();
+    };
+
+  } catch (err) {
+    addLog(`Error: ${err.message}`, 'error');
+  }
+});
+
+// ===== EVENT LISTENERS =====
+btnConnect.onclick = connectMQTT;
+btnDisconnect.onclick = disconnectMQTT;
+document.getElementById('btn-start').onclick = startCNC;
+document.getElementById('btn-stop').onclick = stopCNC;
+document.getElementById('btn-reset-all').onclick = resetAll;
+
+if (document.getElementById('btn-pause')) {
+  document.getElementById('btn-pause').onclick = pauseCNC;
+}
+
+if (document.getElementById('btn-home')) {
+  document.getElementById('btn-home').onclick = homeCNC;
+}
+
+// Manual control - Jog buttons
+document.querySelectorAll('[data-jog]').forEach(btn => {
+  btn.onclick = () => {
+    const jog = parseFloat(document.getElementById('jog-distance').value);
+    const speed = parseFloat(document.getElementById('jog-speed').value);
+    const action = btn.dataset.jog;
+
+    let cmd = '';
+    switch(action) {
+      case 'x+': cmd = `G91\nG0 X${jog} F${speed}\nG90`; break;
+      case 'x-': cmd = `G91\nG0 X${-jog} F${speed}\nG90`; break;
+      case 'y+': cmd = `G91\nG0 Y${jog} F${speed}\nG90`; break;
+      case 'y-': cmd = `G91\nG0 Y${-jog} F${speed}\nG90`; break;
+      case 'home-xy': cmd = `G28`; break;
+    }
+    if (cmd) {
+      sendManualGcode(cmd);
+      addLog(`Jog: ${action}`);
+    }
+  };
+});
+
+// Manual control - Command buttons
+document.querySelectorAll('[data-cmd]').forEach(btn => {
+  btn.onclick = () => {
+    let cmd = btn.dataset.cmd;
+    if (cmd === 'pen-down') {
+      cmd = `M3 S${penDown}`;
+    } else if (cmd === 'pen-up') {
+      cmd = `M5 S${penUp}`;
+    }
+    sendManualGcode(cmd);
+    addLog(`Command: ${cmd}`);
+  };
+});
+
+// Custom G-code
+document.getElementById('btn-send-custom').onclick = () => {
+  const cmd = document.getElementById('custom-gcode').value.trim();
+  if (cmd) {
+    sendManualGcode(cmd);
+    document.getElementById('custom-gcode').value = '';
+    addLog(`Sent: ${cmd}`);
+  }
+};
+
+// Test patterns
+document.getElementById('btn-square').onclick = () => {
+  const s = parseFloat(document.getElementById('test-size').value);
+  const gcode = `M17\nG90\nM5 S${penUp}\nG0 X0 Y0 F3000\nM3 S${penDown}\nG1 X${s} Y0 F1000\nG1 X${s} Y${s}\nG1 X0 Y${s}\nG1 X0 Y0\nM5 S${penUp}\nG0 X0 Y0 F3000`;
+  sendManualGcode(gcode);
+  addLog('Drawing square...');
+};
+
+document.getElementById('btn-cross').onclick = () => {
+  const s = parseFloat(document.getElementById('test-size').value);
+  const gcode = `M17\nG90\nM5 S${penUp}\nG0 X0 Y0 F3000\nM3 S${penDown}\nG1 X${s} Y${s} F1000\nM5 S${penUp}\nG0 X${s} Y0 F3000\nM3 S${penDown}\nG1 X0 Y${s}\nM5 S${penUp}\nG0 X0 Y0 F3000`;
+  sendManualGcode(gcode);
+  addLog('Drawing cross...');
+};
+
+document.getElementById('btn-triangle').onclick = () => {
+  const s = parseFloat(document.getElementById('test-size').value);
+  const half = s / 2;
+  const gcode = `M17\nG90\nM5 S${penUp}\nG0 X0 Y0 F3000\nM3 S${penDown}\nG1 X${s} Y0 F1000\nG1 X${half} Y${s}\nG1 X0 Y0\nM5 S${penUp}\nG0 X0 Y0 F3000`;
+  sendManualGcode(gcode);
+  addLog('Drawing triangle...');
+};
+
+document.getElementById('btn-circle').onclick = () => {
+  const s = parseFloat(document.getElementById('test-size').value);
+  const r = s / 2;
+  const cx = r;
+  const cy = r;
+  const segments = 36;
+  let gcode = `M17\nG90\nM5 S${penUp}\nG0 X${cx + r} Y${cy} F3000\nM3 S${penDown}\n`;
+  for (let i = 1; i <= segments; i++) {
+    const angle = (i / segments) * 2 * Math.PI;
+    const x = (cx + r * Math.cos(angle)).toFixed(2);
+    const y = (cy + r * Math.sin(angle)).toFixed(2);
+    gcode += `G1 X${x} Y${y} F1000\n`;
+  }
+  gcode += `M5 S${penUp}\nG0 X0 Y0 F3000`;
+  sendManualGcode(gcode);
+  addLog('Drawing circle...');
+};
+
+// Expander toggle
+function toggleExpander(el) {
+  el.parentElement.classList.toggle('open');
+}
+
+// Initialize
+updateGcodeViewer();
+updateProgress();
+addLog('🎮 System ready - Auto-start mode');
+addLog(`📦 Batch size: ${GCODE_BATCH_SIZE} lines`);
+  </script>
+</body>
+</html>
